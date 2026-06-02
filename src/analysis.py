@@ -1,12 +1,11 @@
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, count, sum as spark_sum, lit, log1p, explode, mean, round
+from pyspark.sql.functions import col, count, sum, lit, log1p, explode, mean, round, min, max
 from pathlib import Path
 
 
 gold_db = Path("database/gold")
 
-charts_dir = Path("output/charts")
-catalog_dir = Path("output/catalog")
+export_path = Path("export")
 
 
 def analyze_top_genres(spark: SparkSession):
@@ -16,27 +15,31 @@ def analyze_top_genres(spark: SparkSession):
 
     try:
         # Read from Gold Layer
-        movie_genre_gold = spark.read.parquet(str(gold_db / "movie_genre_gold"))
-        
+        df_movie_genre_gold = spark.read.format("parquet").load(str(gold_db / "movie_genre_gold"))
 
         # Top 10 Genres by Total Ratings
-        grand_total = movie_genre_gold.count()
+        grand_total = df_movie_genre_gold.count()
 
-        top_10_genres = (movie_genre_gold
-            .groupBy("genre")
-            .agg(count("*").alias("total_ratings"))
-            .withColumn("percentage", round((col("total_ratings") / lit(grand_total) * 100), 2))
-            .orderBy(col("total_ratings").desc())
-            .limit(10))
+        top_10_genres = (
+            df_movie_genre_gold
+                .groupBy("genre")
+                .agg(count("*").alias("total_ratings"))
+                .withColumn("percentage", round((col("total_ratings") / lit(grand_total) * 100), 2))
+                .orderBy(col("total_ratings").desc())
+                .limit(10)
+        )
 
         print("=== Top 10 Genres by Total Number of Ratings ===")
 
         top_10_genres.show(truncate=False)
 
+        # Save to CSV file
+        top_10_genres.toPandas().to_csv(str(export_path / "top_10_genres.csv"), index=False)
+
 
         # Popularity Evolution Over Time (Yearly Trend)
         yearly_trend = (
-            movie_genre_gold
+            df_movie_genre_gold
                 .groupBy("rating_year", "genre")
                 .agg(count("*").alias("total_ratings"))
                 .orderBy("rating_year", col("total_ratings").desc())
@@ -49,14 +52,18 @@ def analyze_top_genres(spark: SparkSession):
 
         print("=== Genres Popularity over time by rating year ===")
     
+        # For single column
+        min_value = df_movie_genre_gold.agg(min("rating_year")).collect()[0][0]
+
         (
         top_genres_trend
-            .filter(col("rating_year") >= 1996)
+            .filter(col("rating_year") >= min_value)
             .orderBy("rating_year", col("total_ratings").desc())
             .show(10, truncate=False)
         )
 
-        return top_10_genres, top_genres_trend
+        # Save to CSV file
+        top_genres_trend.toPandas().to_csv(str(export_path / "top_genres_trend.csv"), index=False)
 
     except Exception as e:
         print(f"Error in genre analysis: {e}")
@@ -70,33 +77,36 @@ def find_hidden_gems(spark: SparkSession):
 
     try:
         # Read from Gold Layer
-        movie_gold = spark.read.parquet(str(gold_db / "movies_gold"))
-        movie_genre_gold = spark.read.parquet(str(gold_db / "movie_genre_gold"))
-
+        df_movie_gold = spark.read.format("parquet").load(str(gold_db / "movies_gold"))
+        df_movie_genre_gold = spark.read.format("parquet").load(str(gold_db / "movie_genre_gold"))
 
         # Identify Hidden Gems
         hidden_gems = (
-            movie_gold
+            df_movie_gold
                 .filter((col("rating_count") < 50) & (col("avg_rating") > 4.0))
                 .select("movieId", "movieTitle", "avg_rating", "rating_count")
                 .orderBy(col("avg_rating").desc(), col("rating_count").desc())
         )
 
+
         print("\n=== Hidden Gems with Rating Count < 50 and Avg Rating > 4.0) ===")
 
         hidden_gems.show(10, truncate=False)
 
+        # Save to CSV file
+        hidden_gems.toPandas().to_csv(str(export_path / "hidden_gems.csv"), index=False)
+
 
         # Overall genre distribution
         overall_genre_dist = (
-            movie_genre_gold
+            df_movie_genre_gold
                 .groupBy("genre")
                 .agg(count("*").alias("overall_count"))
-                .withColumn("overall_pct", round((col("overall_count") / lit(movie_genre_gold.count()) * 100), 2))
+                .withColumn("overall_pct", round((col("overall_count") / lit(df_movie_genre_gold.count()) * 100), 2))
         )
 
         # Hidden gems genre distribution
-        gems_with_genre = hidden_gems.join(movie_genre_gold.select("movieId", "genre"), "movieId")
+        gems_with_genre = hidden_gems.join(df_movie_genre_gold.select("movieId", "genre"), "movieId")
 
         gems_genre_dist = (
             gems_with_genre
@@ -128,8 +138,9 @@ def find_hidden_gems(spark: SparkSession):
             )
             .show(10, truncate=False)
         )
-        
-        return hidden_gems, comparison
+
+        # Save to CSV file
+        comparison.toPandas().to_csv(str(export_path / "hidden_gems_comparison.csv"), index=False)
 
     except Exception as e:
         print(f"Error in hidden gems analysis: {e}")
@@ -144,13 +155,14 @@ def select_inflight_catalog(spark: SparkSession, n: int = 100):
 
     try:
         # Read Gold tables
-        movie_gold = spark.read.parquet(str(gold_db / "movies_gold"))
-        movie_genre_gold = spark.read.parquet(str(gold_db / "movie_genre_gold"))
+        df_movie_gold = spark.read.format("parquet").load(str(gold_db / "movies_gold"))
+        df_movie_genre_gold = spark.read.format("parquet").load(str(gold_db / "movie_genre_gold"))
 
-        # Filter movies with minimum credibility
-        popularity = movie_gold.filter(col("rating_count") >= 10)
+        # Criteria 1 = Filter movies with minimum credibility
+        popularity = df_movie_gold.filter(col("rating_count") >= 10)
 
-        # Calculate Bayesian Score to balance average rating and popularity
+
+        # Criteria 2 = Balance average rating and popularity by calculating Bayesian Score
         catalog = popularity.withColumn(
             "score", 
             col("avg_rating") * log1p(col("rating_count"))
@@ -159,14 +171,15 @@ def select_inflight_catalog(spark: SparkSession, n: int = 100):
         # Select Top N by score
         final_catalog = catalog.orderBy(col("score").desc()).limit(n)
 
-        # === Genre Coverage Analysis ===
+
+        # Criteria 3 = Ensure Genre Coverage
         catalog_with_genres = final_catalog.join(
-            movie_genre_gold.select("movieId", "genre"), 
+            df_movie_genre_gold.select("movieId", "genre"), 
             "movieId"
         )
 
         genre_coverage = (catalog_with_genres
-            .groupBy("genre")
+            .groupBy("movieTitle","genre")
             .agg(count("*").alias("movie_count"))
             .orderBy(col("movie_count").desc()))
 
@@ -176,16 +189,26 @@ def select_inflight_catalog(spark: SparkSession, n: int = 100):
         print("\nGenre Coverage in Catalog:")
         genre_coverage.show(20, truncate=False)
 
+
         # Top N Recommended Movies
         print(f"Top {n} Recommended Movies for Inflight:")
-        final_catalog.select(
-            "movieTitle", 
-            round(col("avg_rating"), 2).alias("avg_rating"), 
-            "rating_count", 
-            round(col("score"), 2).alias("score")
-        ).show(n, truncate=False)
 
-        return final_catalog, genre_coverage
+        (
+        final_catalog
+            .join(genre_coverage, "movieTitle")
+            .select (
+                "movieTitle", 
+                round(col("avg_rating"), 2).alias("avg_rating"), 
+                "rating_count", 
+                round(col("score"), 2).alias("score")
+            )
+            .distinct()
+            .orderBy(col("score").desc())
+            .show(n, truncate=False)
+        )
+
+        # Save to CSV file
+        final_catalog.toPandas().to_csv(str(export_path / "inflight_catalog.csv"), index=False)
 
     except Exception as e:
         print(f"Error in inflight catalog selection: {e}")

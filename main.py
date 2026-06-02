@@ -39,6 +39,9 @@ def main():
     
         print("##### All Processes completed successfully!\n")
 
+        print("Spark Web UI is available at: http://localhost:4040")
+        input("Press Enter to stop Spark Session and exit...\n")
+    
     finally:
         spark.stop()
 

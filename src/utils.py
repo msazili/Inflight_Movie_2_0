@@ -13,6 +13,8 @@ def create_spark_session():
     spark = (SparkSession.builder
              .appName("Inflight Entertainment Analytics")
              .master("local[*]")
+             .config("spark.sql.adaptive.enabled", "true")        # Performance optimization
+             .config("spark.sql.shuffle.partitions", "100")       # Control parallelism
              .getOrCreate())
 
     print("\n## Spark Session created successfully")

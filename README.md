@@ -1,4 +1,4 @@
-# Inflight Entertainment Analytics Challenge
+# Inflight Entertainment Analytics
 
 ## 1. Summary
 
